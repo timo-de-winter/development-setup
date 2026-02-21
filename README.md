@@ -9,17 +9,18 @@ A personal reference repository for my local development environment. This repo 
 
 ## Getting started
 
-Clone the repo and run the appropriate setup script for your OS:
+Clone the repo and run the setup script. The script will ask you what you want to install, so no worries :).
 
 ```bash
-git clone <repo-url> && cd development-setup
+git clone https://github.com/timo-de-winter/development-setup.git && cd development-setup
+
+bash bin/install
 ```
 
-## Repository structure
-
-```
-development-setup/
-├── README.md
-├── scripts/       # Automated installation scripts
-└── tools/         # Tool documentation and configs
-```
+## Tools I use
+- **PHPStorm** is my code-editor of choice
+- **GitKraken** is my git GUI
+- **Fork** is an alternative git GUI I use, since gitkraken can be slow at times
+- **Warp** is my command-line of choice (it has great AI integration capabilities)
+- **WSL2** is what I use to run a lot of projects
+- **Laravel Herd** for local windows development environment

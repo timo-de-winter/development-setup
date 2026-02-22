@@ -1,0 +1,563 @@
+#!/bin/bash
+
+# ──────────────────────────────────────────────
+#  Development Environment Setup
+# ──────────────────────────────────────────────
+
+set -euo pipefail
+
+# ── Colors & Formatting ──────────────────────
+
+BOLD='\033[1m'
+DIM='\033[2m'
+RESET='\033[0m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+RED='\033[0;31m'
+CYAN='\033[0;36m'
+BLUE='\033[0;34m'
+MAGENTA='\033[0;35m'
+
+# ── Symbols ──────────────────────────────────
+
+CHECK="${GREEN}✔${RESET}"
+CROSS="${RED}✘${RESET}"
+ARROW="${CYAN}▸${RESET}"
+DOT="${DIM}·${RESET}"
+
+# ── Helpers ──────────────────────────────────
+
+banner() {
+  echo ""
+  echo -e "${MAGENTA}${BOLD}┌──────────────────────────────────────────┐${RESET}"
+  echo -e "${MAGENTA}${BOLD}│     Development Environment Setup        │${RESET}"
+  echo -e "${MAGENTA}${BOLD}└──────────────────────────────────────────┘${RESET}"
+  echo ""
+}
+
+section() {
+  echo ""
+  echo -e "  ${BLUE}${BOLD}── $1 ──${RESET}"
+  echo ""
+}
+
+info() {
+  echo -e "  ${ARROW} $1"
+}
+
+success() {
+  echo -e "  ${CHECK} $1"
+}
+
+warn() {
+  echo -e "  ${YELLOW}! $1${RESET}"
+}
+
+fail() {
+  echo -e "  ${CROSS} $1"
+}
+
+# Ask user a yes/no question. Returns 0 for yes, 1 for no.
+# Usage: ask "Install this tool?" && do_thing
+ask() {
+  local prompt="$1"
+  local answer
+  echo ""
+  echo -ne "  ${CYAN}?${RESET} ${BOLD}${prompt}${RESET} ${DIM}[y/N]${RESET} "
+  read -r answer
+  case "$answer" in
+    [yY]|[yY][eE][sS]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# ── Environment Detection ────────────────────
+
+detect_env() {
+  IS_WSL=false
+  IS_WINDOWS_NATIVE=false
+  IS_LINUX=false
+
+  if [[ -n "${WSL_DISTRO_NAME:-}" ]] || grep -qi microsoft /proc/version 2>/dev/null; then
+    IS_WSL=true
+  elif [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "win32" ]] \
+    || [[ "${OS:-}" == "Windows_NT" ]] \
+    || uname -s 2>/dev/null | grep -qi "mingw\|msys\|cygwin"; then
+    IS_WINDOWS_NATIVE=true
+  elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
+    IS_LINUX=true
+  fi
+}
+
+print_env() {
+  section "Environment"
+
+  if $IS_WINDOWS_NATIVE; then
+    info "Platform: ${BOLD}Windows (native shell)${RESET}"
+  elif $IS_WSL; then
+    info "Platform: ${BOLD}WSL (${WSL_DISTRO_NAME:-unknown distro})${RESET}"
+  elif $IS_LINUX; then
+    info "Platform: ${BOLD}Linux${RESET}"
+  else
+    warn "Unknown platform: $OSTYPE"
+  fi
+}
+
+# ── Platform Helpers ─────────────────────────
+
+has_powershell() {
+  command -v powershell.exe &>/dev/null
+}
+
+is_linux() {
+  $IS_WSL || $IS_LINUX
+}
+
+apt_install() {
+  local pkg="$1"
+  if sudo apt-get install -y "$pkg"; then
+    success "$pkg installed"
+  else
+    fail "$pkg installation failed"
+    return 1
+  fi
+}
+
+# Add lines to ~/.bashrc idempotently.
+# Pass each line as a separate argument.
+add_to_bash_profile() {
+  for line in "$@"; do
+    grep -qxF "$line" ~/.bashrc 2>/dev/null || echo "$line" >> ~/.bashrc
+  done
+}
+
+# ── Tool Helpers ─────────────────────────────
+
+ensure_scoop() {
+  if command -v scoop &>/dev/null; then
+    return 0
+  fi
+
+  info "Installing Scoop (required as package manager)..."
+
+  if powershell.exe -NoProfile -Command "
+    Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
+    iex \"& {\$(irm get.scoop.sh)} -RunAsAdmin\"
+    if (\$?) { exit 0 } else { exit 1 }
+  "; then
+    success "Scoop installed"
+  else
+    fail "Scoop installation failed"
+    return 1
+  fi
+}
+
+scoop_install() {
+  local pkg="$1"
+  if powershell.exe -NoProfile -Command "
+    \$env:PATH = [System.Environment]::GetEnvironmentVariable('PATH', 'User') + ';' + [System.Environment]::GetEnvironmentVariable('PATH', 'Machine')
+    scoop install $pkg
+    if (\$?) { exit 0 } else { exit 1 }
+  "; then
+    success "$pkg installed"
+  else
+    fail "$pkg installation failed"
+    return 1
+  fi
+}
+
+# Add lines to the PowerShell profile (idempotent).
+# Pass each line as a separate argument.
+add_to_ps_profile() {
+  local lines=""
+  for line in "$@"; do
+    lines+="$line"$'\n'
+  done
+
+  # Write lines to a temp file so we avoid bash→powershell escaping issues
+  local tmpfile
+  tmpfile=$(mktemp /tmp/ps_profile_lines.XXXXXX)
+  printf '%s' "$lines" > "$tmpfile"
+
+  local win_tmpfile
+  win_tmpfile=$(wslpath -w "$tmpfile" 2>/dev/null || echo "$tmpfile")
+
+  powershell.exe -NoProfile -Command "
+    \$profilePath = \$PROFILE.CurrentUserCurrentHost
+    \$profileDir = Split-Path \$profilePath
+    if (!(Test-Path \$profileDir)) { New-Item -ItemType Directory -Path \$profileDir -Force | Out-Null }
+    if (!(Test-Path \$profilePath)) { New-Item -ItemType File -Path \$profilePath -Force | Out-Null }
+    \$content = Get-Content \$profilePath -Raw -ErrorAction SilentlyContinue
+    \$newLines = Get-Content '$win_tmpfile' -ErrorAction Stop
+    foreach (\$line in \$newLines) {
+      if ([string]::IsNullOrWhiteSpace(\$line)) { continue }
+      if (\$content -and \$content.Contains(\$line)) {
+        Write-Host \"Already in profile: \$line\"
+      } else {
+        Add-Content -Path \$profilePath -Value \$line
+        Write-Host \"Added to profile: \$line\"
+      }
+    }
+  "
+  rm -f "$tmpfile"
+}
+
+# ── Tool Installers ──────────────────────────
+
+install_warp() {
+  section "Warp (terminal emulator)"
+
+  info "An AI-powered terminal with modern editing and agent support"
+
+  # Check if Warp is already installed
+  if has_powershell; then
+    if powershell.exe -NoProfile -Command "Test-Path '$env:LOCALAPPDATA\Programs\Warp\Warp.exe'" 2>/dev/null | grep -qi true; then
+      success "Warp is already installed"
+      return 0
+    fi
+  elif is_linux; then
+    if command -v warp-terminal &>/dev/null; then
+      success "Warp is already installed"
+      return 0
+    fi
+  fi
+
+  if ! ask "Install Warp?"; then
+    info "Skipped"
+    return 0
+  fi
+
+  if has_powershell; then
+    info "${DIM}Installs: Warp via winget${RESET}"
+    if powershell.exe -NoProfile -Command "winget install Warp.Warp; if (\$?) { exit 0 } else { exit 1 }"; then
+      success "Warp installed"
+    else
+      fail "Warp installation failed"
+      return 1
+    fi
+  elif is_linux; then
+    info "${DIM}Installs: Warp via apt (adds official repo)${RESET}"
+    sudo apt-get install -y wget gpg || return 1
+    wget -qO- https://releases.warp.dev/linux/keys/warp.asc | gpg --dearmor > /tmp/warpdotdev.gpg
+    sudo install -D -o root -g root -m 644 /tmp/warpdotdev.gpg /etc/apt/keyrings/warpdotdev.gpg
+    rm -f /tmp/warpdotdev.gpg
+    sudo sh -c 'echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/warpdotdev.gpg] https://releases.warp.dev/linux/deb stable main" > /etc/apt/sources.list.d/warpdotdev.list'
+    sudo apt update && sudo apt install -y warp-terminal
+    if command -v warp-terminal &>/dev/null; then
+      success "Warp installed"
+    else
+      fail "Warp installation failed"
+      return 1
+    fi
+  fi
+}
+
+install_unix_utils() {
+  section "Unix-like Utilities (uutils-coreutils)"
+
+  if ! has_powershell; then
+    info "Skipping ${DIM}— Windows only (Linux already has coreutils)${RESET}"
+    return 0
+  fi
+
+  info "Provides Unix commands (ls, cat, cp, mv, ...) natively on Windows"
+  info "${DIM}Installs: Scoop + uutils-coreutils${RESET}"
+
+  if ! ask "Install Unix-like utilities?"; then
+    info "Skipped"
+    return 0
+  fi
+
+  ensure_scoop || return 1
+  scoop_install uutils-coreutils
+}
+
+install_eza() {
+  section "eza (modern ls replacement)"
+
+  info "A modern replacement for ls with icons and git integration"
+  info "${DIM}  ls  → eza --icons --git${RESET}"
+  info "${DIM}  ll  → eza -l --icons --git${RESET}"
+
+  if ! ask "Install eza?"; then
+    info "Skipped"
+    return 0
+  fi
+
+  if has_powershell; then
+    info "${DIM}Installs: Scoop + eza, registers PowerShell aliases${RESET}"
+    ensure_scoop || return 1
+    scoop_install eza || return 1
+
+    info "Registering PowerShell aliases..."
+    add_to_ps_profile \
+      'if (Test-Path Alias:ls) { Remove-Item Alias:ls -Force }' \
+      'function ls { eza --icons --git @args }' \
+      'function ll { eza -l --icons --git @args }'
+    success "Aliases registered in PowerShell profile"
+  elif is_linux; then
+    info "${DIM}Installs: apt + eza, registers bash aliases${RESET}"
+    apt_install eza || return 1
+
+    add_to_bash_profile \
+      "alias ls='eza --icons --git'" \
+      "alias ll='eza -l --icons --git'"
+    success "Aliases registered in ~/.bashrc"
+  fi
+}
+
+install_zoxide() {
+  section "zoxide (smarter cd)"
+
+  info "A smarter cd command that learns your most used directories"
+
+  if ! ask "Install zoxide?"; then
+    info "Skipped"
+    return 0
+  fi
+
+  if has_powershell; then
+    info "${DIM}Installs: Scoop + zoxide + fzf${RESET}"
+    ensure_scoop || return 1
+    scoop_install fzf || return 1
+    scoop_install zoxide || return 1
+
+    add_to_ps_profile 'Invoke-Expression (& { (zoxide init powershell | Out-String) })'
+    success "zoxide initialized in PowerShell profile"
+
+    info "${DIM}  cd  → z  (zoxide jump)${RESET}"
+    info "${DIM}  cdi → zi (zoxide interactive)${RESET}"
+    if ask "Create aliases: cd → z, cdi → zi?"; then
+      add_to_ps_profile \
+        'if (Test-Path Alias:cd) { Remove-Item Alias:cd -Force }' \
+        'function cd { z @args }' \
+        'function cdi { zi @args }'
+      success "Aliases registered in PowerShell profile"
+    else
+      info "Aliases skipped"
+    fi
+  elif is_linux; then
+    info "${DIM}Installs: apt + fzf + zoxide${RESET}"
+    apt_install fzf || return 1
+    apt_install zoxide || return 1
+
+    add_to_bash_profile 'eval "$(zoxide init bash)"'
+    success "zoxide initialized in ~/.bashrc"
+
+    info "${DIM}  cd  → z  (zoxide jump)${RESET}"
+    info "${DIM}  cdi → zi (zoxide interactive)${RESET}"
+    if ask "Create aliases: cd → z, cdi → zi?"; then
+      add_to_bash_profile \
+        "alias cd='z'" \
+        "alias cdi='zi'"
+      success "Aliases registered in ~/.bashrc"
+    else
+      info "Aliases skipped"
+    fi
+  fi
+}
+
+install_bat() {
+  section "bat (modern cat replacement)"
+
+  info "A cat clone with syntax highlighting and git integration"
+
+  if ! ask "Install bat?"; then
+    info "Skipped"
+    return 0
+  fi
+
+  if has_powershell; then
+    info "${DIM}Installs: Scoop + bat${RESET}"
+    ensure_scoop || return 1
+    scoop_install bat || return 1
+
+    info "${DIM}  cat → bat${RESET}"
+    if ask "Create alias: cat → bat?"; then
+      add_to_ps_profile \
+        'if (Test-Path Alias:cat) { Remove-Item Alias:cat -Force }' \
+        'function cat { bat @args }'
+      success "Alias registered in PowerShell profile"
+    else
+      info "Alias skipped"
+    fi
+  elif is_linux; then
+    info "${DIM}Installs: apt + bat${RESET}"
+    apt_install bat || return 1
+
+    info "${DIM}  cat → batcat (Debian/Ubuntu names the binary batcat)${RESET}"
+    if ask "Create alias: cat → batcat?"; then
+      add_to_bash_profile "alias cat='batcat'"
+      success "Alias registered in ~/.bashrc"
+    else
+      info "Alias skipped"
+    fi
+  fi
+}
+
+install_fnm() {
+  section "fnm (Fast Node Manager)"
+
+  info "A fast and simple Node.js version manager"
+
+  if ! ask "Install fnm?"; then
+    info "Skipped"
+    return 0
+  fi
+
+  if has_powershell; then
+    info "${DIM}Installs: Scoop + fnm${RESET}"
+    ensure_scoop || return 1
+    scoop_install fnm || return 1
+
+    add_to_ps_profile 'fnm env --use-on-cd --shell powershell | Out-String | Invoke-Expression'
+    success "fnm initialized in PowerShell profile"
+  elif is_linux; then
+    info "${DIM}Installs: fnm via official install script${RESET}"
+    if curl -fsSL https://fnm.vercel.app/install | bash; then
+      success "fnm installed (shell init added to ~/.bashrc by installer)"
+    else
+      fail "fnm installation failed"
+      return 1
+    fi
+  fi
+}
+
+install_nano() {
+  section "nano (terminal text editor)"
+
+  if ! has_powershell; then
+    info "Skipping ${DIM}— Windows only (Linux already has nano)${RESET}"
+    return 0
+  fi
+
+  info "A simple terminal text editor for Windows"
+  info "${DIM}Installs: Scoop + nano${RESET}"
+
+  if ! ask "Install nano?"; then
+    info "Skipped"
+    return 0
+  fi
+
+  ensure_scoop || return 1
+  scoop_install 7zip || return 1
+  scoop_install nano
+}
+
+install_claude_code() {
+  section "Claude Code (AI coding assistant)"
+
+  info "Anthropic's CLI for Claude — an AI coding assistant"
+  info "${DIM}Installs: @anthropic-ai/claude-code (via npm)${RESET}"
+
+  if ! ask "Install Claude Code?"; then
+    info "Skipped"
+    return 0
+  fi
+
+  if ! command -v npm &>/dev/null; then
+    fail "npm not found — install Node.js (e.g. via fnm) first"
+    return 1
+  fi
+
+  local prefix=""
+  if is_linux; then
+    prefix="sudo"
+  fi
+
+  if $prefix npm install -g @anthropic-ai/claude-code; then
+    success "Claude Code installed"
+  else
+    fail "Claude Code installation failed"
+    return 1
+  fi
+
+  info ""
+  info "Chief is an autonomous PRD agent that runs Claude Code in a loop"
+  info "${DIM}Installs: chief (via install script)${RESET}"
+
+  if ask "Also install Chief for Claude?"; then
+    if has_powershell; then
+      if curl -fsSL https://raw.githubusercontent.com/minicodemonkey/chief/main/install.sh | CHIEF_INSTALL_DIR="/usr/local/bin" bash; then
+        success "Chief installed"
+        # Create a PowerShell wrapper so chief can be called from Windows
+        local wsl_cmd='function chief { wsl chief @args }'
+        add_to_ps_profile "$wsl_cmd"
+        success "PowerShell wrapper registered (calls chief via WSL)"
+      else
+        fail "Chief installation failed"
+      fi
+    elif is_linux; then
+      if curl -fsSL https://raw.githubusercontent.com/minicodemonkey/chief/main/install.sh | bash; then
+        success "Chief installed"
+        add_to_bash_profile 'export PATH="$PATH:$HOME/.local/bin"'
+        success "~/.local/bin added to PATH in ~/.bashrc"
+      else
+        fail "Chief installation failed"
+      fi
+    fi
+  else
+    info "Skipped"
+  fi
+}
+
+install_art_alias() {
+  section "art (php artisan shortcut)"
+
+  info "Shorthand for php artisan commands"
+  info "${DIM}  art migrate → php artisan migrate${RESET}"
+
+  if ! ask "Create alias: art → php artisan?"; then
+    info "Skipped"
+    return 0
+  fi
+
+  if has_powershell; then
+    add_to_ps_profile 'function art { php artisan @args }'
+    success "Alias registered in PowerShell profile"
+  elif is_linux; then
+    add_to_bash_profile "alias art='php artisan'"
+    success "Alias registered in ~/.bashrc"
+  fi
+}
+
+# ── Main ─────────────────────────────────────
+
+main() {
+  banner
+  detect_env
+  print_env
+
+  section "Tools"
+  info "The following tools can be installed:"
+  echo ""
+  echo -e "    ${BOLD}Tool${RESET}                    ${BOLD}Environment${RESET}"
+  echo -e "    ${DIM}─────────────────────   ──────────────${RESET}"
+  echo -e "    Warp (terminal)         All platforms"
+  echo -e "    Unix-like utilities     Windows only"
+  echo -e "    eza (ls replacement)    All platforms"
+  echo -e "    bat (cat replacement)   All platforms"
+  echo -e "    zoxide (smarter cd)     All platforms"
+  echo -e "    fnm (node manager)      All platforms"
+  echo -e "    nano (text editor)      Windows only"
+  echo -e "    Claude Code (AI)        All platforms"
+  echo -e "    art (php artisan)       All platforms"
+  echo ""
+
+  install_warp
+  install_unix_utils
+  install_eza
+  install_zoxide
+  install_bat
+  install_fnm
+  install_nano
+  install_claude_code
+  install_art_alias
+
+  section "Done"
+  success "Setup complete!"
+  warn "You'll have to restart your terminal to enable all features."
+  echo ""
+}
+
+main "$@"

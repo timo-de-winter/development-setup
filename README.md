@@ -39,7 +39,7 @@ All things that contain a `+` in front of it are installable through the command
 
 ### CLI tools & aliases
 **Tools**
-- +**fnm** is a fast node version manager (works better than `nvm` for me, while still working with `.nvmrc` files)
+- +**fnm** is a fast node version manager (works better than `nvm` for me, while still working with `.nvmrc` files, auto switch when moving to other directories)
 - +**nano** is a terminal text editor
 
 **Aliases**

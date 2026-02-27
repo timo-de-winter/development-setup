@@ -180,7 +180,7 @@ add_to_ps_profile() {
   printf '%s' "$lines" > "$tmpfile"
 
   local win_tmpfile
-  win_tmpfile=$(wslpath -w "$tmpfile" 2>/dev/null || echo "$tmpfile")
+  win_tmpfile=$(wslpath -w "$tmpfile" 2>/dev/null || cygpath -w "$tmpfile" 2>/dev/null || echo "$tmpfile")
 
   powershell.exe -NoProfile -Command "
     \$profilePath = \$PROFILE.CurrentUserCurrentHost
@@ -211,7 +211,7 @@ install_warp() {
 
   # Check if Warp is already installed
   if has_powershell; then
-    if powershell.exe -NoProfile -Command "Test-Path '$env:LOCALAPPDATA\Programs\Warp\Warp.exe'" 2>/dev/null | grep -qi true; then
+    if powershell.exe -NoProfile -Command 'Test-Path "$env:LOCALAPPDATA\Programs\Warp\Warp.exe"' 2>/dev/null | grep -qi true; then
       success "Warp is already installed"
       return 0
     fi
@@ -330,7 +330,7 @@ install_zoxide() {
     if ask "Create aliases: cd → z, cdi → zi?"; then
       add_to_ps_profile \
         'if (Test-Path Alias:cd) { Remove-Item Alias:cd -Force }' \
-        'function cd { z @args }' \
+        'function cd { z @args; if (Get-Command fnm -ErrorAction SilentlyContinue) { fnm use 2>$null } }' \
         'function cdi { zi @args }'
       success "Aliases registered in PowerShell profile"
     else
@@ -410,7 +410,7 @@ install_fnm() {
     ensure_scoop || return 1
     scoop_install fnm || return 1
 
-    add_to_ps_profile 'fnm env --use-on-cd --shell powershell | Out-String | Invoke-Expression'
+    add_to_ps_profile 'fnm env --shell powershell | Out-String | Invoke-Expression'
     success "fnm initialized in PowerShell profile"
   elif is_linux; then
     info "${DIM}Installs: fnm via official install script${RESET}"
@@ -478,14 +478,43 @@ install_claude_code() {
 
   if ask "Also install Chief for Claude?"; then
     if has_powershell; then
-      if curl -fsSL https://raw.githubusercontent.com/minicodemonkey/chief/main/install.sh | CHIEF_INSTALL_DIR="/usr/local/bin" bash; then
-        success "Chief installed"
-        # Create a PowerShell wrapper so chief can be called from Windows
-        local wsl_cmd='function chief { wsl chief @args }'
-        add_to_ps_profile "$wsl_cmd"
-        success "PowerShell wrapper registered (calls chief via WSL)"
+      # Download the binary using Git Bash (working DNS) and install into WSL
+      local chief_version
+      chief_version=$(curl -fsSL "https://api.github.com/repos/minicodemonkey/chief/releases/latest" 2>/dev/null \
+        | grep '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')
+      if [[ -z "$chief_version" ]]; then
+        fail "Could not determine latest Chief version"
       else
-        fail "Chief installation failed"
+        local version_num="${chief_version#v}"
+        local wsl_arch
+        wsl_arch=$(wsl uname -m < /dev/null 2>/dev/null)
+        case "$wsl_arch" in
+          x86_64) wsl_arch="amd64" ;;
+          aarch64) wsl_arch="arm64" ;;
+        esac
+        local archive="chief_${version_num}_linux_${wsl_arch}.tar.gz"
+        local url="https://github.com/minicodemonkey/chief/releases/download/${chief_version}/${archive}"
+        local tmpdir
+        tmpdir=$(mktemp -d)
+        if curl -fsSL "$url" -o "$tmpdir/$archive" && tar -xzf "$tmpdir/$archive" -C "$tmpdir"; then
+          # Convert Git Bash path to Windows path, then to WSL /mnt/ path
+          local win_path
+          win_path=$(cygpath -w "$tmpdir/chief")
+          # e.g. C:\Users\...\chief → /mnt/c/Users/.../chief
+          local wsl_path
+          wsl_path=$(echo "$win_path" | sed -E 's|^([A-Z]):\\|/mnt/\L\1/|' | sed 's|\\|/|g')
+          if wsl bash -c "mkdir -p ~/.local/bin && cp '$wsl_path' ~/.local/bin/chief && chmod +x ~/.local/bin/chief" < /dev/null; then
+            success "Chief ${chief_version} installed in WSL (~/.local/bin)"
+            local wsl_cmd='function chief { wsl chief @args }'
+            add_to_ps_profile "$wsl_cmd"
+            success "PowerShell wrapper registered (calls chief via WSL)"
+          else
+            fail "Failed to copy Chief binary to WSL"
+          fi
+        else
+          fail "Failed to download Chief ${chief_version}"
+        fi
+        rm -rf "$tmpdir"
       fi
     elif is_linux; then
       if curl -fsSL https://raw.githubusercontent.com/minicodemonkey/chief/main/install.sh | bash; then
@@ -499,6 +528,29 @@ install_claude_code() {
   else
     info "Skipped"
   fi
+}
+
+install_wsl_aliases() {
+  section "WSL quick aliases (wslon / wsloff)"
+
+  if ! has_powershell; then
+    info "Skipping ${DIM}— Windows only${RESET}"
+    return 0
+  fi
+
+  info "Quickly start or stop the WSL service from PowerShell"
+  info "${DIM}  wslon  → start LxssManager service${RESET}"
+  info "${DIM}  wsloff → stop all WSL-related services${RESET}"
+
+  if ! ask "Create aliases: wslon, wsloff?"; then
+    info "Skipped"
+    return 0
+  fi
+
+  add_to_ps_profile \
+    'function wslon { Start-Process powershell -Verb RunAs -ArgumentList "-Command Set-Service WSLService -StartupType Manual; Start-Service WSLService" }' \
+    'function wsloff { Start-Process powershell -Verb RunAs -ArgumentList "-Command Stop-Service WSLService; Set-Service WSLService -StartupType Disabled" }'
+  success "Aliases registered in PowerShell profile"
 }
 
 install_art_alias() {
@@ -537,21 +589,23 @@ main() {
   echo -e "    Unix-like utilities     Windows only"
   echo -e "    eza (ls replacement)    All platforms"
   echo -e "    bat (cat replacement)   All platforms"
-  echo -e "    zoxide (smarter cd)     All platforms"
   echo -e "    fnm (node manager)      All platforms"
+  echo -e "    zoxide (smarter cd)     All platforms"
   echo -e "    nano (text editor)      Windows only"
   echo -e "    Claude Code (AI)        All platforms"
+  echo -e "    wslon/wsloff            Windows only"
   echo -e "    art (php artisan)       All platforms"
   echo ""
 
   install_warp
   install_unix_utils
   install_eza
-  install_zoxide
   install_bat
   install_fnm
+  install_zoxide
   install_nano
   install_claude_code
+  install_wsl_aliases
   install_art_alias
 
   section "Done"
